@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# Reconix - Security reconnaissance automation framework
+
+set -o pipefail
+
+RECONIX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export RECONIX_ROOT
+
+# shellcheck source=core/bootstrap.sh
+source "${RECONIX_ROOT}/core/bootstrap.sh"
+recon_bootstrap
+
+_recon_help() {
+    cat <<EOF
+Reconix v${RECONIX_VERSION} - Penetration testing & bug bounty automation
+
+USAGE:
+  reconix <command> [arguments]
+  reconix --help [command]
+  source reconix   # Load all functions into shell
+
+COMMANDS:
+  health              Run dependency and config health check
+  config              Show current configuration
+  update              Check for updates from git remote
+  version             Show version
+
+  recon <domain>      Passive subdomain enumeration
+  recon-multi <file>  Multi-domain subdomain enumeration
+  phase2 [company]    Run phase 2 (resolve, scan, nuclei)
+  urls <domain>       Collect URLs (wayback, gau)
+  dns <domain>        Full DNS record enumeration
+  httpx <file>        Probe hosts for live HTTP services
+  nuclei <file>       Run nuclei CVE scan
+  report <workspace>  Generate markdown/HTML report
+
+WORKFLOWS:
+  workflow phase1 <domain>     Subdomain enumeration
+  workflow phase2 [company]    Port scan + vuln scan
+  workflow full <domain>       Complete recon pipeline
+  workflow bugbounty <domain>  Bug bounty focused scan
+
+OPTIONS (environment):
+  LOG_LEVEL=DEBUG     Verbose logging
+  DRY_RUN=true        Simulate destructive operations
+  INTERACTIVE=false   Skip confirmation prompts
+
+CONFIG:
+  ~/.config/reconix/config.env
+
+EXAMPLES:
+  reconix health
+  reconix recon example.com
+  reconix workflow full example.com
+  LOG_LEVEL=DEBUG reconix nuclei alive-hosts.txt
+
+For function-level help after sourcing:
+  reconix shell
+
+Documentation: ${RECONIX_ROOT}/docs/
+EOF
+}
+
+_recon_help_command() {
+    local cmd="$1"
+    case "$cmd" in
+        recon|recon_subdomains_no_brute)
+            cat <<EOF
+recon <domain> - Passive subdomain enumeration
+
+Sources: subfinder, amass, crt.sh, certspotter, bufferover, gau, shodan, etc.
+Output: <domain>/domains.final
+
+Usage: reconix recon example.com
+EOF
+            ;;
+        health)
+            echo "health - Check tools, config, network connectivity"
+            ;;
+        *)
+            echo "No detailed help for: ${cmd}. See docs/USAGE.md"
+            ;;
+    esac
+}
+
+recon_update_check() {
+    if [[ -d "${RECONIX_ROOT}/.git" ]]; then
+        recon_log_info "Checking for updates..."
+        git -C "${RECONIX_ROOT}" fetch origin 2>/dev/null || { recon_log_warn "Cannot fetch remote"; return 1; }
+        local behind
+        behind="$(git -C "${RECONIX_ROOT}" rev-list HEAD..origin/main 2>/dev/null | wc -l)"
+        if [[ "$behind" -gt 0 ]]; then
+            recon_log_warn "${behind} commit(s) behind origin/main. Run: cd ${RECONIX_ROOT} && git pull"
+        else
+            recon_log_success "Up to date"
+        fi
+    else
+        recon_log_warn "Not a git repository"
+    fi
+}
+
+recon_run_workflow() {
+    local wf="$1"
+    shift
+    local script="${RECONIX_ROOT}/workflows/${wf}.sh"
+    if [[ -f "$script" ]]; then
+        # shellcheck source=/dev/null
+        source "$script"
+        "workflow_${wf//-/_}" "$@"
+    else
+        recon_log_error "Workflow not found: ${wf}"
+        return 1
+    fi
+}
+
+_recon_main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        help|-h|--help)
+            [[ -n "${1:-}" ]] && _recon_help_command "$1" || _recon_help
+            ;;
+        version|-v|--version)
+            echo "reconix ${RECONIX_VERSION}"
+            ;;
+        health)
+            recon_health_check
+            ;;
+        config)
+            recon_config_show
+            ;;
+        update)
+            recon_update_check
+            ;;
+        shell|source)
+            recon_log_info "Functions loaded. Use 'help' or see docs/FUNCTIONS.md"
+            ;;
+        recon)
+            recon_subdomains_no_brute "$@"
+            ;;
+        recon-multi)
+            recon_subdomains_no_brute_multi "$@"
+            ;;
+        phase2)
+            recon_phase2 "$@"
+            ;;
+        urls)
+            recon_urls "$@"
+            ;;
+        dns)
+            list_dns_records "$@"
+            ;;
+        httpx)
+            httpx_probe "$@"
+            ;;
+        nuclei)
+            nuclei_scan_cves "$@"
+            ;;
+        report)
+            report_generate "$@"
+            ;;
+        workflow)
+            recon_run_workflow "$@"
+            ;;
+        *)
+            if declare -F "$cmd" >/dev/null 2>&1; then
+                "$cmd" "$@"
+            else
+                recon_log_error "Unknown command: ${cmd}"
+                _recon_help
+                return 1
+            fi
+            ;;
+    esac
+}
+
+# If sourced, load functions only; if executed, run CLI
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    _recon_main "$@"
+fi
